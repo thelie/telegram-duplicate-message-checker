@@ -22,15 +22,33 @@ fn extract_original(fwd: &tl::enums::MessageFwdHeader) -> Option<OriginalMessage
     })
 }
 
+/// Truncate a string to at most `max` characters, appending "..." if truncated.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_owned()
+    } else {
+        let mut end = max;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
 /// Actions that the handler determines need to happen, computed while
 /// holding only the tracker lock. Executed afterward with only the marker lock.
 pub enum Action {
     /// No action needed.
     None,
-    /// Mark these forward locations as read, and optionally cache a peer.
+    /// Cache a peer we learned about from an incoming message.
+    CachePeer {
+        chat_id: i64,
+        peer_ref: PeerRef,
+        name: String,
+    },
+    /// Mark these forward locations as read.
     MarkForwards {
         forwards: Vec<ForwardLocation>,
-        cache_peer: Option<(i64, PeerRef)>,
     },
 }
 
@@ -53,12 +71,20 @@ pub async fn plan_update(
 pub async fn execute_action(action: Action, marker: &mut Marker) {
     match action {
         Action::None => {}
-        Action::MarkForwards {
-            forwards,
-            cache_peer,
+        Action::CachePeer {
+            chat_id,
+            peer_ref,
+            name,
         } => {
-            if let Some((chat_id, peer_ref)) = cache_peer {
-                marker.cache_peer(chat_id, peer_ref);
+            marker.cache_peer(chat_id, peer_ref, name);
+        }
+        Action::MarkForwards { forwards } => {
+            for fwd in &forwards {
+                let name = marker.get_chat_name(fwd.chat_id);
+                info!(
+                    "Marking as read in {} (chat={}, msg={})",
+                    name, fwd.chat_id, fwd.message_id
+                );
             }
             if let Err(e) = marker.mark_forwards_read(&forwards).await {
                 tracing::warn!("Error marking forwards as read: {}", e);
@@ -88,38 +114,28 @@ async fn plan_new_message(
         message_id: message.id(),
     };
 
-    // Grab peer ref for caching (async but no tracker involvement)
-    let cache_peer = message
-        .peer_ref()
-        .await
-        .map(|peer_ref| (chat_id, peer_ref));
+    let chat_name = message
+        .peer()
+        .and_then(|p| p.name().map(str::to_owned))
+        .unwrap_or_else(|| chat_id.to_string());
+    let preview = truncate(message.text(), 100);
 
-    debug!(
-        "Forward detected: original=({}, {}) -> forward=({}, {})",
-        original.peer_id, original.message_id, forward.chat_id, forward.message_id
+    info!(
+        "Forward detected in {} ({}): original=({}, {}) msg={} \"{}\"",
+        chat_name, chat_id, original.peer_id, original.message_id,
+        forward.message_id, preview
     );
 
-    let already_read = tracker.register_forward(original, forward.clone());
+    tracker.register_forward(original, forward);
 
-    if already_read {
-        info!(
-            "Original already read, marking forward as read: chat={}, msg={}",
-            forward.chat_id, forward.message_id
-        );
-        Action::MarkForwards {
-            forwards: vec![forward],
-            cache_peer,
-        }
-    } else {
-        // Still cache the peer even if no marking needed
-        if let Some((cid, pref)) = cache_peer {
-            Action::MarkForwards {
-                forwards: vec![],
-                cache_peer: Some((cid, pref)),
-            }
-        } else {
-            Action::None
-        }
+    // Cache the peer so we can mark-read later
+    match message.peer_ref().await {
+        Some(peer_ref) => Action::CachePeer {
+            chat_id,
+            peer_ref,
+            name: chat_name,
+        },
+        None => Action::None,
     }
 }
 
@@ -153,7 +169,7 @@ fn plan_read_event(
         return Action::None;
     }
 
-    info!(
+    debug!(
         "Read event in chat {}: {} originals newly read",
         chat_id,
         originals.len()
@@ -173,10 +189,13 @@ fn plan_read_event(
         return Action::None;
     }
 
-    info!("Marking {} other forwards as read", all_forwards.len());
+    info!(
+        "Read in chat {}, propagating to {} other forwards",
+        chat_id,
+        all_forwards.len()
+    );
 
     Action::MarkForwards {
         forwards: all_forwards,
-        cache_peer: None,
     }
 }

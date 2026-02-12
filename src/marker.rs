@@ -13,11 +13,11 @@ use crate::tracker::ForwardLocation;
 /// Delay between consecutive mark-as-read API calls to avoid flood limits.
 const MARK_READ_DELAY: Duration = Duration::from_millis(500);
 
-/// Caches peer references so we can make API calls for any known chat.
+/// Caches peer references and names so we can make API calls for any known chat.
 pub struct Marker {
     client: Client,
-    /// chat_id (bot_api_dialog_id) -> PeerRef
-    peer_cache: HashMap<i64, PeerRef>,
+    /// chat_id (bot_api_dialog_id) -> (PeerRef, display name)
+    peer_cache: HashMap<i64, (PeerRef, String)>,
 }
 
 impl Marker {
@@ -38,7 +38,8 @@ impl Marker {
             let peer = dialog.peer();
             let chat_id = peer.id().bot_api_dialog_id();
             if let Some(peer_ref) = peer.to_ref().await {
-                self.peer_cache.insert(chat_id, peer_ref);
+                let name = peer.name().unwrap_or("unnamed").to_owned();
+                self.peer_cache.insert(chat_id, (peer_ref, name));
             }
         }
 
@@ -47,14 +48,22 @@ impl Marker {
     }
 
     /// Cache a peer reference we learn about from an incoming update.
-    pub fn cache_peer(&mut self, chat_id: i64, peer_ref: PeerRef) {
-        self.peer_cache.entry(chat_id).or_insert(peer_ref);
+    pub fn cache_peer(&mut self, chat_id: i64, peer_ref: PeerRef, name: String) {
+        self.peer_cache.entry(chat_id).or_insert((peer_ref, name));
+    }
+
+    /// Look up the display name for a chat, falling back to its numeric ID.
+    pub fn get_chat_name(&self, chat_id: i64) -> &str {
+        self.peer_cache
+            .get(&chat_id)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("unknown")
     }
 
     /// Mark messages up to `max_id` as read in a given chat.
     pub async fn mark_read(&self, chat_id: i64, max_id: i32) -> Result<()> {
         let peer_ref = match self.peer_cache.get(&chat_id) {
-            Some(p) => *p,
+            Some((p, _)) => *p,
             None => {
                 bail!("No cached peer for chat_id={}, cannot mark as read", chat_id);
             }

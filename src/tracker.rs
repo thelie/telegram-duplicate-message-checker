@@ -64,13 +64,11 @@ pub struct DuplicateTracker {
 
 impl DuplicateTracker {
     /// Register a forwarded message as a copy of an original.
-    /// Returns true if the original was already marked as read (meaning
-    /// the caller should mark this forward as read too).
     pub fn register_forward(
         &mut self,
         original: OriginalMessageId,
         forward: ForwardLocation,
-    ) -> bool {
+    ) {
         let now = epoch_secs();
         self.first_seen.entry(original.clone()).or_insert(now);
 
@@ -86,9 +84,7 @@ impl DuplicateTracker {
         }
 
         self.forward_index
-            .insert(forward, original.clone());
-
-        self.read_originals.contains(&original)
+            .insert(forward, original);
     }
 
     /// Mark an original as read. Returns all forward locations
@@ -206,4 +202,174 @@ fn epoch_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn orig(peer: i64, msg: i32) -> OriginalMessageId {
+        OriginalMessageId { peer_id: peer, message_id: msg }
+    }
+
+    fn fwd(chat: i64, msg: i32) -> ForwardLocation {
+        ForwardLocation { chat_id: chat, message_id: msg }
+    }
+
+    #[test]
+    fn register_and_lookup() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f = fwd(2, 200);
+
+        t.register_forward(o.clone(), f.clone());
+
+        assert_eq!(t.lookup_forward(&f), Some(&o));
+        assert!(!t.is_original_read(&o));
+    }
+
+    #[test]
+    fn register_duplicate_forward_is_idempotent() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f = fwd(2, 200);
+
+        t.register_forward(o.clone(), f.clone());
+        t.register_forward(o.clone(), f.clone());
+
+        // Should only have one entry, not two
+        assert_eq!(t.originals.get(&o).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn multiple_forwards_of_same_original() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f1 = fwd(2, 200);
+        let f2 = fwd(3, 300);
+
+        t.register_forward(o.clone(), f1.clone());
+        t.register_forward(o.clone(), f2.clone());
+
+        assert_eq!(t.originals.get(&o).unwrap().len(), 2);
+        assert_eq!(t.lookup_forward(&f1), Some(&o));
+        assert_eq!(t.lookup_forward(&f2), Some(&o));
+    }
+
+    #[test]
+    fn mark_original_read_returns_all_forwards() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f1 = fwd(2, 200);
+        let f2 = fwd(3, 300);
+
+        t.register_forward(o.clone(), f1.clone());
+        t.register_forward(o.clone(), f2.clone());
+
+        let result = t.mark_original_read(&o);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&f1));
+        assert!(result.contains(&f2));
+        assert!(t.is_original_read(&o));
+    }
+
+    #[test]
+    fn find_read_originals_filters_by_chat_and_max_id() {
+        let mut t = DuplicateTracker::default();
+        let o1 = orig(1, 100);
+        let o2 = orig(1, 101);
+
+        // Both forwarded to chat 10, different message IDs
+        t.register_forward(o1.clone(), fwd(10, 50));
+        t.register_forward(o2.clone(), fwd(10, 60));
+
+        // max_id=55 should only find the forward with msg_id=50
+        let found = t.find_read_originals_in_chat(10, 55);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], o1);
+
+        // max_id=60 should find both
+        let found = t.find_read_originals_in_chat(10, 60);
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn find_read_originals_excludes_already_read() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        t.register_forward(o.clone(), fwd(10, 50));
+
+        // Mark as read first
+        t.mark_original_read(&o);
+
+        // Should not appear again
+        let found = t.find_read_originals_in_chat(10, 50);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn find_read_originals_empty_for_unknown_chat() {
+        let t = DuplicateTracker::default();
+        assert!(t.find_read_originals_in_chat(999, 100).is_empty());
+    }
+
+    #[test]
+    fn cleanup_removes_old_entries() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f = fwd(2, 200);
+        t.register_forward(o.clone(), f.clone());
+
+        // Backdate the first_seen to make it old
+        t.first_seen.insert(o.clone(), 0);
+
+        t.cleanup(1); // max_age_secs=1, anything older than ~now is removed
+
+        assert!(t.originals.is_empty());
+        assert!(t.forward_index.is_empty());
+        assert!(t.read_originals.is_empty());
+        assert!(t.first_seen.is_empty());
+        assert!(t.chat_index.is_empty());
+    }
+
+    #[test]
+    fn cleanup_keeps_recent_entries() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f = fwd(2, 200);
+        t.register_forward(o.clone(), f.clone());
+
+        // Very long max age — nothing should be cleaned
+        t.cleanup(999_999_999);
+
+        assert_eq!(t.originals.len(), 1);
+        assert_eq!(t.forward_index.len(), 1);
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100);
+        let f1 = fwd(2, 200);
+        let f2 = fwd(3, 300);
+        t.register_forward(o.clone(), f1.clone());
+        t.register_forward(o.clone(), f2.clone());
+        t.mark_original_read(&o);
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_owned();
+        t.save(&path).unwrap();
+
+        let loaded = DuplicateTracker::load(&path).unwrap();
+
+        // Verify data survived the round trip
+        assert_eq!(loaded.originals.len(), 1);
+        assert_eq!(loaded.originals.get(&o).unwrap().len(), 2);
+        assert!(loaded.is_original_read(&o));
+        assert_eq!(loaded.lookup_forward(&f1), Some(&o));
+        assert_eq!(loaded.lookup_forward(&f2), Some(&o));
+        // chat_index is rebuilt from forward_index on load
+        assert!(!loaded.chat_index.is_empty());
+    }
 }

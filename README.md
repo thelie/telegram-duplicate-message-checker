@@ -10,8 +10,9 @@ Telegram doesn't sync read state across duplicate/forwarded messages. When the s
 
 1. Connects to Telegram as a user client (not a bot) via MTProto
 2. Monitors all incoming messages for forward metadata (`fwd_from.from_id` + `channel_post`)
-3. When you read a forwarded message, detects all other copies of the same original
-4. Automatically marks the duplicates as read
+3. Tracks which messages are copies of the same original — new forwards are **never** auto-marked as read, even if you've already read another copy
+4. When you **actively read** a forwarded message in any chat, detects all other copies of the same original and marks them as read
+5. Logs show channel names and message previews so you can see what's happening at a glance
 
 ## Setup
 
@@ -59,6 +60,8 @@ src/
 ```
 
 The update handler uses a two-phase design: phase 1 computes what needs to happen (holding only the tracker lock), phase 2 executes network I/O (holding only the marker lock). This avoids blocking state persistence during slow API calls.
+
+The marker module maintains a peer cache with display names, populated at startup from all dialogs and updated as new messages arrive. This allows log output to show human-readable channel names instead of numeric IDs.
 
 ## State persistence
 
