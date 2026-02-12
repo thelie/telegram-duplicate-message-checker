@@ -153,6 +153,14 @@ fn plan_raw_update(
             let chat_id = PeerId::channel(u.channel_id).bot_api_dialog_id();
             plan_read_event(chat_id, u.max_id, tracker)
         }
+        // Discussion group threads (comments under channel posts).
+        // The thread root (top_msg_id) is the auto-forwarded channel post
+        // in the discussion group — treat it as read when the user opens
+        // the thread.
+        tl::enums::Update::ReadChannelDiscussionInbox(u) => {
+            let chat_id = PeerId::channel(u.channel_id).bot_api_dialog_id();
+            plan_read_event(chat_id, u.top_msg_id, tracker)
+        }
         _ => Action::None,
     }
 }
