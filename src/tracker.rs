@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::Path;
 use tracing::info;
 
@@ -16,19 +17,48 @@ pub struct ForwardLocation {
     pub message_id: i32,
 }
 
+/// serde_json can't use structs as map keys (JSON keys must be strings).
+/// These helpers serialize HashMap<K,V> as Vec<(K,V)> instead.
+mod map_as_vec {
+    use super::*;
+
+    pub fn serialize<S, K, V>(map: &HashMap<K, V>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + Eq + Hash,
+        V: Serialize,
+    {
+        let vec: Vec<(&K, &V)> = map.iter().collect();
+        vec.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K, V>(deserializer: D) -> std::result::Result<HashMap<K, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+    {
+        let vec: Vec<(K, V)> = Vec::deserialize(deserializer)?;
+        Ok(vec.into_iter().collect())
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DuplicateTracker {
     /// original -> all known forwards
+    #[serde(with = "map_as_vec")]
     originals: HashMap<OriginalMessageId, Vec<ForwardLocation>>,
     /// forward location -> its original
+    #[serde(with = "map_as_vec")]
     forward_index: HashMap<ForwardLocation, OriginalMessageId>,
     /// originals the user has read
     read_originals: HashSet<OriginalMessageId>,
     /// timestamp (seconds since epoch) when each original was first seen
-    #[serde(default)]
+    #[serde(default, with = "map_as_vec")]
     first_seen: HashMap<OriginalMessageId, u64>,
-    /// chat_id -> set of (message_id, original) for O(1) read-event lookups
-    #[serde(default)]
+    /// chat_id -> set of (message_id, original) for O(1) read-event lookups.
+    /// Rebuilt from forward_index on load, so not critical to persist.
+    #[serde(skip)]
     chat_index: HashMap<i64, Vec<(i32, OriginalMessageId)>>,
 }
 
@@ -120,7 +150,6 @@ impl DuplicateTracker {
             if let Some(forwards) = self.originals.remove(orig) {
                 for fwd in &forwards {
                     self.forward_index.remove(fwd);
-                    // Remove from chat_index
                     if let Some(chat_entries) = self.chat_index.get_mut(&fwd.chat_id) {
                         chat_entries.retain(|(mid, _)| *mid != fwd.message_id);
                         if chat_entries.is_empty() {
@@ -137,8 +166,7 @@ impl DuplicateTracker {
         }
     }
 
-    /// Rebuild the chat_index from forward_index. Called after deserialization
-    /// to handle state files that predate the chat_index field.
+    /// Rebuild the chat_index from forward_index.
     fn rebuild_chat_index(&mut self) {
         self.chat_index.clear();
         for (fwd, orig) in &self.forward_index {
@@ -155,10 +183,8 @@ impl DuplicateTracker {
             .context("Failed to read state file")?;
         let mut tracker: Self =
             serde_json::from_str(&data).context("Failed to parse state file")?;
-        // Rebuild chat_index in case it was absent in the saved state
-        if tracker.chat_index.is_empty() && !tracker.forward_index.is_empty() {
-            tracker.rebuild_chat_index();
-        }
+        // chat_index is skipped during serde, always rebuild it
+        tracker.rebuild_chat_index();
         Ok(tracker)
     }
 
