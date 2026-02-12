@@ -1,0 +1,17 @@
+[package]
+name = "telegram-duplicate-message-checker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+grammers-client = { git = "https://github.com/Lonami/grammers.git" }
+grammers-session = { git = "https://github.com/Lonami/grammers.git" }
+grammers-tl-types = { git = "https://github.com/Lonami/grammers.git" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"
+dirs = "6"
