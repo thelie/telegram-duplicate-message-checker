@@ -11,7 +11,7 @@ Telegram doesn't sync read state across duplicate/forwarded messages. When the s
 1. Connects to Telegram as a user client (not a bot) via MTProto
 2. Monitors all incoming messages for forward metadata (`fwd_from.from_id` + `channel_post`)
 3. Tracks which messages are copies of the same original — new forwards are **never** auto-marked as read, even if you've already read another copy
-4. When you **actively read** a forwarded message in any chat, detects all other copies of the same original and marks them as read
+4. When you **actively read** a forwarded message in any chat — including channel discussion groups (comment threads) — detects all other copies of the same original and marks them as read
 5. Logs show channel names and message previews so you can see what's happening at a glance
 
 ## Setup

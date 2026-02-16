@@ -347,6 +347,41 @@ mod tests {
         assert_eq!(t.forward_index.len(), 1);
     }
 
+    /// Simulates the discussion group scenario: a channel post forwarded to
+    /// two discussion groups. Reading the thread root (top_msg_id) in one
+    /// group should propagate to the other.
+    #[test]
+    fn discussion_group_read_propagation() {
+        let mut t = DuplicateTracker::default();
+        let o = orig(1, 100); // original channel post
+
+        // Same post forwarded to two discussion groups as thread roots
+        let f1 = fwd(10, 300); // discussion group A, thread root msg 300
+        let f2 = fwd(20, 400); // discussion group B, thread root msg 400
+
+        t.register_forward(o.clone(), f1.clone());
+        t.register_forward(o.clone(), f2.clone());
+
+        // User opens thread in group A → ReadChannelDiscussionInbox
+        // with top_msg_id=300. We look up originals with msg_id <= 300
+        // in chat 10, which finds f1.
+        let found = t.find_read_originals_in_chat(10, 300);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], o);
+
+        // Mark original as read, get all forwards to propagate
+        let all_fwds = t.mark_original_read(&o);
+        assert_eq!(all_fwds.len(), 2);
+
+        // Filter out the one the user already read (f1 in chat 10)
+        let to_mark: Vec<_> = all_fwds
+            .into_iter()
+            .filter(|f| !(f.chat_id == 10 && f.message_id <= 300))
+            .collect();
+        assert_eq!(to_mark.len(), 1);
+        assert_eq!(to_mark[0], f2);
+    }
+
     #[test]
     fn save_and_load_round_trip() {
         let mut t = DuplicateTracker::default();
